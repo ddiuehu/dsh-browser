@@ -44,6 +44,7 @@ export interface TypertGatewayLike {
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
     readonly signal?: AbortSignal
+    readonly peer?: unknown
   }): Promise<unknown>
 }
 
@@ -54,6 +55,25 @@ export interface TypertGatewayLike {
  */
 const EMPTY_WIRE_UPLINK: AsyncIterable<unknown> = {
   async *[Symbol.asyncIterator]() { /* no uplink items */ },
+}
+
+/**
+ * dsh 0.2.1 requires a live Gateway Peer for invoke, wireStream.open and the
+ * shared `/api` fetch; `$events/result` is rejected unless it is the same Peer.
+ */
+const BRIDGE_PEER = {
+  id: 'bridge-browser',
+  principal: { kind: 'owner' } as const,
+  signal: new AbortController().signal,
+  interactions: 'answer' as const,
+  dispose: async () => {},
+}
+
+function withBridgePeer(gateway: TypertGatewayLike): TypertGatewayLike {
+  return {
+    invoke: (request) => gateway.invoke({ ...request, peer: BRIDGE_PEER }),
+    wireStream: gateway.wireStream,
+  }
 }
 
 /**
@@ -70,13 +90,13 @@ function openWireStream(gateway: TypertGatewayLike, endpoint: string, payload: u
   if (open.length === 3) {
     return open(endpoint, payload, signal)
   }
-  return open(endpoint, payload, EMPTY_WIRE_UPLINK, undefined, signal)
+  return open(endpoint, payload, EMPTY_WIRE_UPLINK, BRIDGE_PEER, signal)
 }
 
 /** Structural subset of dsh 0.2's Host Connection service. */
 export interface HostConnectionLike {
   createSharedFetchHandler(channel: '/api'): {
-    fetch(request: Request): Promise<Response>
+    fetch(request: Request, peer?: unknown): Promise<Response>
   }
 }
 
@@ -107,7 +127,7 @@ export function createRemoteHostApi(
   gateway: TypertGatewayLike,
   connection: HostConnectionLike,
 ): BrowserHostApi {
-  return new RemoteHostApi(gateway, connection)
+  return new RemoteHostApi(withBridgePeer(gateway), connection)
 }
 
 class RemoteHostApi implements BrowserHostApi {
@@ -320,7 +340,7 @@ class RemoteHostApi implements BrowserHostApi {
       }),
       signal,
     })
-    const response = await this.fetchHandler.fetch(request)
+    const response = await this.fetchHandler.fetch(request, BRIDGE_PEER)
     if (!response.ok) {
       throw new Error(`$events/result transport failed with HTTP ${String(response.status)}: ${await response.text()}`)
     }
